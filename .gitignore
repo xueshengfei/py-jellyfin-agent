@@ -10,4 +10,5 @@ venv/
 dist/
 build/
 .claude/
-tests/
+tests/test-output/*
+!tests/test-output/.gitkeep

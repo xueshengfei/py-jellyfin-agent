@@ -111,6 +111,7 @@ class BenchmarkRequest(BaseModel):
     questions: list[str]
     concurrency: int = 3
     repeat: int = 1
+    run_id: str = ""
 
 
 # ── LLM Agent 接口 ────────────────────────────────────────
@@ -852,7 +853,7 @@ async def benchmark(req: BenchmarkRequest):
 
     # 保存 Markdown 报告
     try:
-        report_file = save_report(report)
+        report_file = save_report(report, run_id=req.run_id)
         report["report_file"] = report_file
     except Exception as e:
         report["report_file"] = ""

@@ -290,6 +290,7 @@ def build_report(
 # ── 报告保存 ──────────────────────────────────────────
 
 _TESTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tests")
+_TEST_OUTPUT_DIR = os.path.join(_TESTS_DIR, "test-output")
 
 
 def _fmt_ms(ms: float) -> str:
@@ -299,12 +300,20 @@ def _fmt_ms(ms: float) -> str:
     return f"{ms:.0f}ms"
 
 
-def save_report(report: dict) -> str:
-    """将 benchmark 报告保存为 Markdown 表格文件，返回文件路径。"""
-    os.makedirs(_TESTS_DIR, exist_ok=True)
+def save_report(report: dict, run_id: str = "") -> str:
+    """将 benchmark 报告保存为 Markdown 表格文件，返回文件路径。
 
+    run_id: 同一次测试运行的标识，所有批次报告存入同一子目录。
+            为空时自动按当前时间生成。
+    """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filepath = os.path.join(_TESTS_DIR, f"benchmark_{timestamp}.md")
+    if not run_id:
+        run_id = timestamp
+
+    output_dir = os.path.join(_TEST_OUTPUT_DIR, run_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    filepath = os.path.join(output_dir, f"benchmark_{timestamp}.md")
 
     config = report["config"]
     summary = report.get("summary", {})
