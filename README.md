@@ -1,17 +1,19 @@
 # Jellyfin Agent - AI 媒体助手
 
-基于 LangChain + DeepSeek 的 Jellyfin 智能 Agent，用自然语言与你的媒体库对话。
+基于 LangChain 的 Jellyfin 智能 Agent，用自然语言与你的媒体库对话。
+
+底层大模型可自由替换（DeepSeek / OpenAI / 其他兼容 OpenAI 接口的模型均可）。
 
 搜索影片、获取推荐、查看播放进度、浏览剧集和音乐——一句话搞定。
 
 ## 功能特性
 
-- **自然语言交互** - 用中文或英文提问，Agent 自动调用合适的工具
+- **自然语言交互** - 用中文或英文提问，Agent 自动分析意图并调用对应的查询工具
+- **意图识别 + 工具路由** - Agent 封装了 Jellyfin 常用查询操作，按意图自动匹配到对应的工具
 - **SSE 流式输出** - 逐 token 推送，前端实时渲染
 - **多轮对话** - 基于 session 的上下文记忆，支持连续追问
-- **20 个专业工具** - 覆盖搜索、详情、剧集、音乐、播放状态、推荐等
-- **前端卡片支持** - JSON 格式返回完整媒体数据，可直接渲染为 UI 卡片
-- **启动缓存预热** - genres / libraries / years / stats 首次加载即缓存
+- **前端卡片支持** - 返回 item_id + 推荐理由，前端渲染媒体卡片
+- **模型可替换** - 兼容任何 OpenAI 接口格式的 LLM，一行配置即可切换
 
 ## 工作流
 
@@ -62,9 +64,39 @@
 |------|------|
 | Web 框架 | FastAPI + Uvicorn |
 | AI Agent | LangChain ReAct Agent |
-| LLM | DeepSeek (兼容 OpenAI 接口) |
+| LLM | 任意兼容 OpenAI 接口的模型（默认 DeepSeek） |
 | 媒体服务 | Jellyfin API |
 | 通信协议 | SSE + REST |
+
+### 如何更换大模型
+
+项目通过 LangChain 的 `ChatOpenAI` 接入 LLM，只需修改 `.env` 中的两个变量即可切换模型：
+
+```env
+# 示例：切换到 OpenAI
+LLM_API_KEY=sk-xxxxx
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o
+```
+
+然后在 `agent/core.py` 中修改对应的读取方式：
+
+```python
+# agent/core.py — create_agent() 函数
+llm = ChatOpenAI(
+    model=os.getenv("LLM_MODEL", "deepseek-chat"),
+    base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
+    api_key=os.getenv("LLM_API_KEY"),
+)
+```
+
+任何兼容 OpenAI Chat Completions 接口的模型都可以直接接入，包括但不限于：
+
+- DeepSeek (`deepseek-chat`)
+- OpenAI (`gpt-4o`, `gpt-4o-mini`)
+- 通义千问 (`qwen-plus`)
+- GLM (`glm-4`)
+- 本地模型（通过 Ollama / vLLM 等部署的兼容端点）
 
 ## 项目结构
 
@@ -76,7 +108,7 @@ py_jellyfin/
 ├── agent/
 │   └── core.py             # LangChain ReAct Agent 定义
 ├── client/
-│   └── jellyfin.py         # Jellyfin API 客户端 + 20 个 Tool
+│   └── jellyfin.py         # Jellyfin 查询工具封装
 ├── docs/                   # 协议文档
 ├── .env                    # 环境变量配置
 ├── requirements.txt        # Python 依赖
@@ -100,8 +132,12 @@ pip install -r requirements.txt
 复制并编辑 `.env` 文件：
 
 ```env
-DEEPSEEK_API_KEY=your_deepseek_api_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
+# 大模型配置（支持任何兼容 OpenAI 接口的模型）
+LLM_API_KEY=your_api_key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-chat
+
+# Jellyfin 配置
 JELLYFIN_URL=http://your-jellyfin-server:8096
 JELLYFIN_USERNAME=your_username
 JELLYFIN_PASSWORD=your_password
@@ -195,53 +231,96 @@ POST /ask_stream  {"question": "其中哪部最好看", "session_id": "abc123"}
 
 最多 10 轮对话（20 条消息），最多 100 个并发会话。
 
-### 前端示例
+## Agent 工具体系
 
-```js
-const es = new EventSource('/ask_stream?question=推荐3部科幻电影');
+Agent 将 Jellyfin 的查询操作封装为 6 大类工具。当用户提问时，LLM 会自动识别意图，路由到对应类别的工具执行查询：
 
-es.addEventListener('thinking', () => showLoading());
-es.addEventListener('tool', e => {
-  const { status, preview } = JSON.parse(e.data);
-  status === 'calling' ? showToolStatus(preview) : hideToolStatus();
-});
-es.addEventListener('token', e => {
-  const { content } = JSON.parse(e.data);
-  textArea.textContent += content;  // 逐字追加
-});
-es.addEventListener('card', e => {
-  const { id, reason } = JSON.parse(e.data);
-  fetch(`/detail?item_id=${id}`).then(r => r.json())  // 查详情
-    .then(detail => renderCard({ ...detail, reason }));  // 渲染卡片
-});
-es.addEventListener('done', () => es.close());
+```
+用户提问
+    │
+    ▼
+┌──────────┐
+│ 意图识别  │  LLM 判断用户想做什么
+└────┬─────┘
+     │
+     ├── "找电影/电视剧/音乐"  ──→  搜索类工具
+     ├── "讲了什么/详细信息"   ──→  详情类工具
+     ├── "有哪些集/什么歌"     ──→  剧集音乐类工具
+     ├── "看到哪了/下一集"     ──→  播放状态类工具
+     ├── "类似的还有吗"        ──→  推荐发现类工具
+     └── "有哪些分类/统计"     ──→  媒体库统计类工具
 ```
 
-## Agent 工具一览
+### 搜索类
 
-Agent 拥有 20 个工具，按功能分类：
+按关键词、类型、评分、年份等条件搜索媒体库，`_json` 后缀版本返回结构化数据供前端渲染卡片。
 
-| 类别 | 工具 | 说明 |
-|------|------|------|
-| 搜索 | `search_media` / `search_media_json` | 搜索媒体，JSON 版返回卡片数据 |
-| 搜索 | `search_artists` | 搜索歌手 |
-| 搜索 | `search_songs_by_artist` / `_json` | 按歌手搜歌 |
-| 详情 | `get_item_detail` / `get_item_overview` / `get_items_overview` | 元数据 / 简介 / 批量简介 |
-| 剧集/音乐 | `get_episodes` / `get_album_tracks` / `get_lyrics` | 剧集列表 / 曲目 / 歌词 |
-| 状态 | `get_play_status` / `get_next_up` / `get_resume_items` / `get_latest` | 播放状态 / 下一集 / 继续 / 最新 |
-| 发现 | `get_similar` / `get_genres` / `get_years` / `get_libraries` / `get_media_stats` | 相似 / 分类 / 年份 / 媒体库 / 统计 |
+| 用户意图示例 | 对应工具 |
+|-------------|---------|
+| "搜一下星际穿越" / "找几部动作片" | `search_media` / `search_media_json` |
+| "周杰伦有哪些歌" | `search_artists` / `search_songs_by_artist` / `search_songs_by_artist_json` |
+
+### 详情类
+
+获取单个或多个媒体的完整元数据（名称、评分、演员、时长、简介等）。
+
+| 用户意图示例 | 对应工具 |
+|-------------|---------|
+| "这部电影的详细信息" | `get_item_detail` |
+| "讲了什么" / "剧情简介" | `get_item_overview` / `get_items_overview` |
+
+### 剧集音乐类
+
+深入查询单个媒体的子内容——电视剧的剧集列表、专辑的曲目、歌曲歌词。
+
+| 用户意图示例 | 对应工具 |
+|-------------|---------|
+| "第一季有哪些集" | `get_episodes` |
+| "这张专辑有什么歌" | `get_album_tracks` |
+| "这首歌的歌词" | `get_lyrics` |
+
+### 播放状态类
+
+查询用户的观看/收听进度、追剧状态、最近添加的内容。
+
+| 用户意图示例 | 对应工具 |
+|-------------|---------|
+| "我看到哪了" / "哪些没看完" | `get_play_status` / `get_resume_items` |
+| "下一集是什么" | `get_next_up` |
+| "最近加了什么新片" | `get_latest` |
+
+### 推荐发现类
+
+基于已有内容发现相似推荐。
+
+| 用户意图示例 | 对应工具 |
+|-------------|---------|
+| "和这部类似的电影" / "还推荐什么" | `get_similar` |
+
+### 媒体库统计类
+
+获取媒体库的整体概览——分类、年份分布、各媒体库内容统计。
+
+| 用户意图示例 | 对应工具 |
+|-------------|---------|
+| "有哪些分类" / "什么类型多" | `get_genres` |
+| "库里有哪几年的电影" | `get_years` |
+| "我的媒体库里都有什么" | `get_libraries` / `get_media_stats` |
 
 ## 示例对话
 
 ```
 用户: 帮我找一部诺兰导演的电影
-Agent: 我找到了以下克里斯托弗·诺兰导演的电影...
+Agent: [意图: 搜索] → search_media
+       我找到了以下克里斯托弗·诺兰导演的电影...
 
 用户: 讲了什么？
-Agent: [调用 get_item_overview 获取简介] 这部电影讲述的是...
+Agent: [意图: 详情] → get_item_overview
+       这部电影讲述的是...
 
 用户: 类似的电影还有哪些？
-Agent: [调用 get_similar] 为你找到了这些类似的电影...
+Agent: [意图: 推荐] → get_similar
+       为你找到了这些类似的电影...
 ```
 
 ## License
