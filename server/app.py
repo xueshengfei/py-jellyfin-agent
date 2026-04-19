@@ -3,8 +3,10 @@
 import asyncio
 import json
 import os
+import time
 import traceback
 import uuid
+from enum import Enum
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -16,6 +18,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from pydantic import BaseModel
 
 from agent import create_agent, SYSTEM_PROMPT
+from server.debug import DebugTrace, run_single, build_report, save_report
 from client import (
     search_media, get_genres, get_years, get_libraries, get_media_stats,
     get_item_detail, get_item_overview, get_items_overview,
@@ -101,6 +104,13 @@ def _match_final_items(answer: str, collected: dict) -> list[dict]:
 class AskRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
+    debug: bool = False
+
+
+class BenchmarkRequest(BaseModel):
+    questions: list[str]
+    concurrency: int = 3
+    repeat: int = 1
 
 
 # ── LLM Agent 接口 ────────────────────────────────────────
@@ -133,25 +143,32 @@ def delete_session(session_id: str):
 @app.post("/ask_stream")
 async def ask_stream_post(req: AskRequest):
     """POST 版本，JSON body 传参。"""
-    return _build_sse_response(req.question, req.session_id)
+    return _build_sse_response(req.question, req.session_id, debug=req.debug)
 
 
 @app.get("/ask_stream")
-async def ask_stream_get(question: str, session_id: Optional[str] = None):
+async def ask_stream_get(question: str, session_id: Optional[str] = None, debug: bool = False):
     """GET 版本，query string 传参（兼容浏览器 EventSource）。
 
-    用法: GET /ask_stream?question=推荐3部电影&session_id=可选
+    用法: GET /ask_stream?question=推荐3部电影&session_id=可选&debug=true
     """
-    return _build_sse_response(question, session_id)
+    return _build_sse_response(question, session_id, debug=debug)
 
 
-def _build_sse_response(question: str, session_id: Optional[str]):
+def _build_sse_response(question: str, session_id: Optional[str], debug: bool = False):
     session_id, session = get_or_create_session(session_id)
+    trace = DebugTrace(enabled=debug)
+    trace.question = question
 
     async def generate():
+        trace.start("agent_create")
         agent = create_agent()
+        trace.end("agent_create")
         full_answer = ""
-        collected_items = {}  # id -> item data，收集搜索结果但不立即推送
+        collected_items = {}
+        llm_count = 0
+        current_llm = ""
+        llm_tokens = 0
 
         # 拼接历史消息 + 当前问题
         history = list(session["messages"])
@@ -167,6 +184,13 @@ def _build_sse_response(question: str, session_id: Optional[str]):
 
             # LLM 开始生成
             if kind == "on_chat_model_start":
+                if current_llm:
+                    trace.end(current_llm, tokens=llm_tokens)
+                    trace.token_count += llm_tokens
+                llm_count += 1
+                current_llm = f"llm_{llm_count}"
+                llm_tokens = 0
+                trace.start(current_llm)
                 yield sse_event("thinking", {"node": "llm"})
                 await asyncio.sleep(0)
 
@@ -175,15 +199,23 @@ def _build_sse_response(question: str, session_id: Optional[str]):
                 chunk = event["data"]["chunk"]
                 if isinstance(chunk.content, str) and chunk.content:
                     full_answer += chunk.content
+                    llm_tokens += 1
                     yield sse_event("token", {"content": chunk.content})
                     await asyncio.sleep(0)
 
             # 工具调用开始（不推送客户端，仅内部处理）
             elif kind == "on_tool_start":
+                if current_llm:
+                    trace.end(current_llm, tokens=llm_tokens)
+                    trace.token_count += llm_tokens
+                    current_llm = ""
+                trace.start(f"tool:{name}")
                 await asyncio.sleep(0)
 
             # 工具调用结束（收集数据，不推送给客户端）
             elif kind == "on_tool_end":
+                trace.end(f"tool:{name}")
+                trace.tool_calls.append(name)
                 output = event["data"].get("output", "")
                 output_str = output.content if hasattr(output, "content") else str(output)
 
@@ -199,10 +231,18 @@ def _build_sse_response(question: str, session_id: Optional[str]):
 
                 await asyncio.sleep(0)
 
+        # 结束最后一个 LLM phase
+        if current_llm:
+            trace.end(current_llm, tokens=llm_tokens)
+            trace.token_count += llm_tokens
+
         # 流结束后，从回答中提取最终推荐，生成推荐理由，推送精简卡片
+        trace.start("card_match")
         final_cards = _match_final_items(full_answer, collected_items)
+        trace.end("card_match", cards=len(final_cards))
 
         if final_cards:
+            trace.start("card_reason")
             yield sse_event("thinking", {"node": "reason"})
             await asyncio.sleep(0)
             try:
@@ -224,10 +264,11 @@ def _build_sse_response(question: str, session_id: Optional[str]):
                 reason_map = {r.get("index"): r.get("reason", "") for r in reasons}
                 for i, card in enumerate(final_cards):
                     card["reason"] = reason_map.get(i, "")
-                    yield sse_event("card", {"id": card["id"], "reason": card["reason"]})
+                    yield sse_event("card", {"id": card["id"], "reason": card["reason"], "type": _card_type(card.get("type", ""))})
                     await asyncio.sleep(0)
             except Exception:
                 pass
+            trace.end("card_reason", cards=len(final_cards))
 
         # 保存到会话历史（只保留 user + ai 文本，不存工具调用）
         session["messages"].append(("user", question))
@@ -237,9 +278,12 @@ def _build_sse_response(question: str, session_id: Optional[str]):
         if len(session["messages"]) > MAX_HISTORY:
             session["messages"] = session["messages"][-MAX_HISTORY:]
 
+        trace.response = full_answer
+        trace.log()
+
         yield sse_event("session", {"session_id": session_id, "history_count": len(session["messages"])})
         await asyncio.sleep(0)
-        yield sse_event("done", {"answer": full_answer, "cards": [{"id": c["id"], "reason": c.get("reason", "")} for c in final_cards], "session_id": session_id})
+        yield sse_event("done", {"answer": full_answer, "cards": [{"id": c["id"], "reason": c.get("reason", ""), "type": _card_type(c.get("type", ""))} for c in final_cards], "session_id": session_id})
 
     return StreamingResponse(
         generate(),
@@ -377,6 +421,36 @@ SORT_ORDER_OK = {"Descending", "Ascending"}
 _llm = None
 
 
+# ── 卡片类型枚举 ──────────────────────────────────────────
+
+class CardType(str, Enum):
+    """卡片类型，帮助前端决定跳转到哪个详情页。"""
+    VIDEO = "video"      # 电影、电视剧、剧集等
+    MUSIC = "music"      # 歌曲、专辑、歌手等
+    BOOK = "book"        # 书籍
+    MANGA = "manga"      # 漫画
+
+
+_JELLYFIN_TYPE_MAP: dict[str, CardType] = {
+    "Movie": CardType.VIDEO,
+    "Series": CardType.VIDEO,
+    "Episode": CardType.VIDEO,
+    "Video": CardType.VIDEO,
+    "Season": CardType.VIDEO,
+    "Audio": CardType.MUSIC,
+    "MusicAlbum": CardType.MUSIC,
+    "MusicArtist": CardType.MUSIC,
+    "MusicVideo": CardType.MUSIC,
+    "Book": CardType.BOOK,
+    "ComicBook": CardType.MANGA,
+}
+
+
+def _card_type(jellyfin_type: str) -> str:
+    """Jellyfin 类型 → 卡片类型枚举值，未知类型默认 video。"""
+    return _JELLYFIN_TYPE_MAP.get(jellyfin_type, CardType.VIDEO).value
+
+
 def get_llm():
     global _llm
     if _llm is None:
@@ -477,7 +551,7 @@ RECOMMEND_PROMPT = """你是 Jellyfin 媒体库推荐助手。根据用户需求
 - 只返回 JSON"""
 
 
-REASON_PROMPT = """根据用户的问题和搜索到的媒体列表，为**每个**媒体写一句简短的推荐理由（10-20字）。
+REASON_PROMPT = """根据用户的问题和搜索到的媒体列表，为**每个**媒体写一句简短的推荐理由（10-30字）。
 必须为每个 index 都提供 reason，不能遗漏。
 
 用户问题: {question}
@@ -584,6 +658,7 @@ def recommend(req: AskRequest):
 
         for i, item in enumerate(items):
             item["reason"] = reason_map.get(i, "")
+            item["cardType"] = _card_type(item.get("type", ""))
 
         return {"question": question, "items": items, "total": len(items)}
 
@@ -716,3 +791,71 @@ def api_similar(keyword: str = "", item_id: str = "", limit: int = 10):
 @app.get("/lyrics")
 def api_lyrics(keyword: str = "", item_id: str = ""):
     return {"result": get_lyrics.invoke({"keyword": keyword, "item_id": item_id})}
+
+
+# ── Debug / Benchmark ──────────────────────────────────────
+
+@app.post("/debug/benchmark")
+async def benchmark(req: BenchmarkRequest):
+    """并发 benchmark 测试，直接返回 JSON 报告 + 保存 Markdown 表格。
+
+    用法:
+      POST /debug/benchmark
+      {
+        "questions": ["推荐3部科幻电影", "肖申克的救赎讲了什么", "今天天气怎么样"],
+        "concurrency": 3,
+        "repeat": 2
+      }
+
+    返回 JSON 报告，同时在 tests/ 目录生成 Markdown 表格文件。
+    """
+    concurrency = min(req.concurrency, 10)
+    sem = asyncio.Semaphore(concurrency)
+
+    # 展开任务列表
+    task_questions: list[str] = []
+    for q in req.questions:
+        for _ in range(req.repeat):
+            task_questions.append(q)
+    total = len(task_questions)
+
+    t0 = time.perf_counter()
+
+    async def _run(idx: int, question: str):
+        return idx, await run_single(question, sem)
+
+    # 创建所有任务（semaphore 控制并发）
+    tasks = [asyncio.create_task(_run(idx, q)) for idx, q in enumerate(task_questions)]
+    results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+    wall_time = round((time.perf_counter() - t0) * 1000, 1)
+
+    # 收集结果
+    traces: list[DebugTrace] = []
+    for raw in results_raw:
+        if isinstance(raw, Exception):
+            # 创建错误 trace
+            t = DebugTrace(enabled=True)
+            t.error = str(raw)
+            traces.append(t)
+        else:
+            idx, trace = raw
+            trace.log()
+            traces.append(trace)
+
+    report = build_report(
+        traces=traces,
+        questions=list(dict.fromkeys(task_questions)),
+        concurrency=concurrency,
+        repeat=req.repeat,
+        wall_time=wall_time,
+    )
+
+    # 保存 Markdown 报告
+    try:
+        report_file = save_report(report)
+        report["report_file"] = report_file
+    except Exception as e:
+        report["report_file"] = ""
+        report["save_error"] = str(e)
+
+    return report
