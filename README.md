@@ -149,7 +149,7 @@ JELLYFIN_PASSWORD=your_password
 python main.py
 ```
 
-服务启动在 `http://localhost:5000`。
+服务启动在 `http://localhost:5005`。
 
 ## API 接口
 

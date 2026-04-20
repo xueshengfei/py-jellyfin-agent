@@ -15,7 +15,7 @@ import time
 
 import httpx
 
-BASE_URL = os.getenv("AGENT_URL", "http://localhost:5000")
+BASE_URL = os.getenv("AGENT_URL", "http://localhost:5005")
 CASES_FILE = os.path.join(os.path.dirname(__file__), "test_cases.json")
 
 
