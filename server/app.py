@@ -17,7 +17,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from pydantic import BaseModel
 
-from agent import create_agent, SYSTEM_PROMPT
+from agent import create_agent
 from server.debug import DebugTrace, run_single, build_report, save_report
 from client import (
     search_media, get_genres, get_years, get_libraries, get_media_stats,

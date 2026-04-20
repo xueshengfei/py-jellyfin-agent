@@ -9,16 +9,18 @@ from client import ALL_TOOLS
 
 load_dotenv()
 
-SYSTEM_PROMPT = """你是一个 Jellyfin 媒体库助手。用户会用自然语言向你询问媒体相关的问题。
+SYSTEM_PROMPT_TEMPLATE = """你是一个 Jellyfin 媒体库助手。用户会用自然语言向你询问媒体相关的问题。
+
+## 媒体库概况
+{library_context}
 
 ## 工作流程
-1. 分析用户意图，确定筛选条件
+1. 分析用户意图，确定筛选条件（参考上方媒体库概况选择正确的 genres 和 media_type）
 2. 调用工具查询 Jellyfin 媒体库
 3. 用自然语言整理结果回复用户
 
 ## 可用工具
 搜索: search_media / search_media_json(推荐时用这个，返回JSON)
-统计: get_genres / get_years / get_libraries / get_media_stats
 详情: get_item_detail / get_item_overview / get_items_overview
 剧集/音乐: get_episodes / get_album_tracks
 播放状态: get_play_status
@@ -32,54 +34,64 @@ SYSTEM_PROMPT = """你是一个 Jellyfin 媒体库助手。用户会用自然语
 - **禁止使用任何代码块**（不要用 ``` 包裹任何内容）
 - 直接用文字描述媒体名称、评分、简介等信息即可
 
-示例回复:
-
-根据您的要求，推荐3部励志电影：
-
-**1. 肖申克的救赎** (1994) 评分: 8.7
-类型: 剧情、犯罪 | 时长: 142分钟
-一个关于希望与自由的故事，经典越狱励志片，关于永不放弃的信念。
-
-**2. 阿甘正传** (1994) 评分: 8.5
-类型: 喜剧、剧情 | 时长: 142分钟
-阿甘用单纯和善良跑出了传奇人生。
-
-## 何时用 search_media_json
-- 推荐电影/电视剧/音乐时（需要渲染卡片列表）
-- 搜索结果展示时
-- limit 规则同 search_songs_by_artist_json："几部/几首"→5, "N部"→N, 没说→10
-
-## 何时用 search_songs_by_artist_json
-- 按歌手搜歌时（需要渲染歌曲卡片列表）
-- 用户说"xxx的歌"、"xxx的歌曲"时，用这个返回JSON
-- limit 必须根据用户意图设置:
-  - "几首" → limit=5
-  - "一首" → limit=1, "两首" → limit=2, "三首/几首" → limit=3~5
-  - "N首/N部/N个" → limit=N
-  - 明确说"所有/全部"时 → limit=50
-  - 没说数量 → limit=10
-
-## 何时用其他工具
-- 问详情/简介 → get_item_detail / get_item_overview（纯文本回复即可）
-- 问统计/风格/年份 → get_media_stats / get_genres / get_years（纯文本回复）
-- 问播放状态 → get_play_status（纯文本回复）
-- 问剧集 → get_episodes（纯文本回复即可）
-
 ## 搜索策略
-- 最多调用 6 次搜索工具。超过 6 次后无论结果如何都必须停止搜索，直接用已有结果回复用户。
-- 不要用相似的关键词反复搜索同一个意图。搜索 2-3 次后如果结果不理想，就基于已有结果给出推荐，同时告知用户可以换关键词再试。
+- 推荐类请求只需调用 1 次 search_media_json，用最精准的关键词即可
+- genres 参数必须使用上方风格列表中的原值（中英文均可，优先用列表中存在的值）
+- 如果第一次搜索无结果，最多再试 1 次不同关键词，然后基于已有结果回复
+- 不要调用 get_genres / get_years / get_media_stats，这些信息已在上方媒体库概况中提供
+
+## limit 规则
+- "几部/几首"→5, "N部"→N, 没说→10, "所有/全部"→50
+- 按歌手搜歌时用 search_songs_by_artist
 
 ## 非媒体问题处理
-- 如果用户的问题与媒体库完全无关（如问天气、写代码、闲聊等），直接回复："我是 Jellyfin 媒体库助手，只能帮你查询和推荐媒体内容。你可以问我关于电影、电视剧、音乐等方面的问题。" 不要调用任何工具。
-- 常见无关话题包括：时事新闻、编程技术、数学计算、翻译等，一律按上述方式回复。
-- **但如果用户的请求虽然未直接提到媒体，其目标可以通过推荐电影、纪录片、音乐等来实现**（如"提升审美"、"开阔眼界"、"学习地理"、"学英语"、"提高认知"等），应主动将其转化为媒体推荐请求，搜索相关内容推荐给用户。
+- 与媒体库完全无关的问题，直接回复："我是 Jellyfin 媒体库助手，只能帮你查询和推荐媒体内容。你可以问我关于电影、电视剧、音乐等方面的问题。" 不要调用任何工具。
+- 但如果用户的请求虽然未直接提到媒体，其目标可以通过推荐电影、纪录片、音乐等来实现（如"提升审美"、"开阔眼界"、"学习地理"、"学英语"等），应主动搜索相关内容推荐。
 
 ## 注意
 - media_type: Movie=电影, Series=电视剧, Audio=歌曲, Book=书籍
-- genres 用英文: Action, Sci-Fi, Comedy, Drama, Anime 等
 - 评分 min_rating 满分10
-- 回复用中文
-"""
+- 回复用中文"""
+
+
+def _build_library_context() -> str:
+    """从缓存构建媒体库概况文本，注入到 System Prompt。"""
+    from client.jellyfin import _cache
+
+    if not _cache:
+        return "（缓存未加载，请调用工具获取）"
+
+    lines = []
+
+    # 统计数量
+    stats = _cache.get("stats")
+    if stats:
+        stat_parts = [f"{k}{v}" for k, v in stats.items() if v and v > 0]
+        if stat_parts:
+            lines.append("数量: " + ", ".join(stat_parts))
+
+    # 媒体库
+    libraries = _cache.get("libraries")
+    if libraries:
+        lib_names = [lib["name"] for lib in libraries]
+        lines.append("媒体库: " + ", ".join(lib_names))
+
+    # 风格标签（完整列表，LLM 用这些值作为 genres 参数）
+    genres = _cache.get("genres")
+    if genres:
+        lines.append("风格标签（genres 参数只能用以下值）:")
+        # 分行显示，每行约 10 个
+        for i in range(0, len(genres), 10):
+            chunk = genres[i:i + 10]
+            lines.append("  " + ", ".join(chunk))
+
+    # 年份范围
+    years = _cache.get("years")
+    if years:
+        years_str = [str(y) for y in years]
+        lines.append(f"年份范围: {years_str[-1]}~{years_str[0]}（共 {len(years)} 个年份）")
+
+    return "\n".join(lines)
 
 
 def create_agent():
@@ -89,10 +101,11 @@ def create_agent():
         api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
 
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(library_context=_build_library_context())
     agent = create_react_agent(
         llm,
         tools=ALL_TOOLS,
-        prompt=SYSTEM_PROMPT,
+        prompt=prompt,
     )
     # 代码层面硬限制递归深度，防止 Agent 陷入无限循环
     agent = agent.with_config({"recursion_limit": 15})
