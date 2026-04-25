@@ -64,8 +64,9 @@ event: session     ← 会话信息（session_id）
 event: done        ← 结束信号（含完整 answer + 所有卡片）
 ```
 
-> **关键变更**：`card` 事件只在最终推荐阶段发送（不在搜索中间过程），且仅包含 `id` + `reason`。
+> **关键变更**：`card` 事件只在最终推荐阶段发送（不在搜索中间过程），包含 `id` + `reason` + `type`。
 > 客户端拿到 `id` 后调用 `getMediaItemDetail(id)` 从 Jellyfin 获取完整数据（海报、名称、评分等）。
+> `type` 字段帮助前端决定跳转到哪个详情页（如 `movie`/`series`/`audio`/`musicalbum`/`musicartist` 等）。
 
 ### 事件格式概览
 
@@ -74,20 +75,37 @@ event: done        ← 结束信号（含完整 answer + 所有卡片）
 | `thinking` | `{"node": "llm"}` | `llm`=LLM生成 / `reason`=生成推荐理由 |
 | `tool` | `{"tool":"...","status":"calling/done","args":{},"preview":"..."}` | 工具调用状态 |
 | `token` | `{"content": "根"}` | 逐字文本，客户端拼接为 markdown |
-| `card` | `{"id":"abc123","reason":"推荐理由"}` | 最终推荐，仅 id+reason |
+| `card` | `{"id":"abc123","reason":"推荐理由","type":"video"}` | 最终推荐，id+reason+type |
 | `session` | `{"session_id":"a1b2c3","history_count":4}` | 会话信息 |
 | `done` | `{"answer":"...","cards":[...],"session_id":"..."}` | 结束信号 |
 
 ### card 事件
 
 ```json
-{"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题"}
+{"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题", "type": "video"}
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | string | Jellyfin Item ID，客户端用它查询完整数据 |
 | `reason` | string | LLM 生成的推荐理由 |
+| `type` | string | 卡片类型，直接透传 Jellyfin 原始类型名（小写），帮助前端决定跳转到哪个详情页。可选值见下表 |
+
+**type 枚举说明**：
+
+| type 值 | 对应 Jellyfin 类型 | 说明 |
+|---------|-------------------|------|
+| `movie` | Movie | 电影 |
+| `series` | Series | 电视剧 |
+| `episode` | Episode | 剧集 |
+| `video` | Video | 通用视频 |
+| `season` | Season | 季 |
+| `audio` | Audio | 歌曲 |
+| `musicalbum` | MusicAlbum | 音乐专辑 |
+| `musicartist` | MusicArtist | 歌手/艺术家 |
+| `musicvideo` | MusicVideo | 音乐视频 |
+| `book` | Book | 书籍 |
+| `comicbook` | ComicBook | 漫画 |
 
 客户端拿到 `id` 后，通过以下方式获取完整媒体数据：
 - 直通 API：`GET /detail?item_id={id}`
@@ -99,8 +117,8 @@ event: done        ← 结束信号（含完整 answer + 所有卡片）
 {
   "answer": "根据您的要求，推荐3部经典科幻电影：...",
   "cards": [
-    {"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典..."},
-    {"id": "4626c39dcf0b8e2a4b127ae39ba4a689", "reason": "黑帮巅峰..."}
+    {"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典...", "type": "video"},
+    {"id": "4626c39dcf0b8e2a4b127ae39ba4a689", "reason": "黑帮巅峰...", "type": "video"}
   ],
   "session_id": "a1b2c3d4"
 }
@@ -114,7 +132,7 @@ event: done        ← 结束信号（含完整 answer + 所有卡片）
 2. 收到 `tool` (calling) → 显示 "正在搜索..."
 3. 收到 `tool` (done) → 隐藏 "正在搜索..."
 4. 收到 `token` → **追加到文本区域**，实时渲染 markdown
-5. 收到 `card` → 拿到 `id` + `reason`，调 `getMediaItemDetail(id)` 获取完整数据后渲染卡片
+5. 收到 `card` → 拿到 `id` + `reason` + `type`，根据 `type`（如 `movie`、`audio`、`musicartist`）决定跳转目标页，调 `getMediaItemDetail(id)` 获取完整数据后渲染卡片
 6. 收到 `done` → 兜底补全，关闭 SSE 连接
 
 **推荐布局：**
@@ -179,6 +197,7 @@ POST /ask_stream  {"question": "其中哪部最好看", "session_id": "abc123"}
       "runtimeMinutes": 152,
       "posterUrl": "http://localhost:8096/Items/xxx/Images/Primary",
       "reason": "希斯莱杰绝世小丑，DC最佳电影",
+      "cardType": "movie",
       "people": [...],
       "studios": [...],
       "played": false,
@@ -193,6 +212,7 @@ POST /ask_stream  {"question": "其中哪部最好看", "session_id": "abc123"}
 
 - `items` 包含完整媒体数据（与直通 API `/search` 格式一致）
 - `reason` 已填充
+- `cardType` 字段标识卡片类型：`movie` / `series` / `audio` / `musicalbum` / `musicartist` / `book` 等（Jellyfin 原始类型名小写）
 - 空结果时 `items: []`, `total: 0`
 
 ---

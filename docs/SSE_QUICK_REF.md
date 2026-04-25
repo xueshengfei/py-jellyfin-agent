@@ -33,7 +33,7 @@ thinking  →  tool(calling)  →  tool(done)  →  thinking  →  token×N  →
 | `tool` | `{"tool":"search_media_json","status":"calling","args":{...}}` | 工具调用开始 |
 | `tool` | `{"tool":"search_media_json","status":"done","preview":"..."}` | 工具调用完成 |
 | `token` | `{"content": "根"}` | 逐字文本，客户端拼接为完整 markdown |
-| `card` | `{"id":"abc123","reason":"推荐理由"}` | 最终推荐卡片（仅 id+reason，客户端自行查详情） |
+| `card` | `{"id":"abc123","reason":"推荐理由","type":"movie"}` | 最终推荐卡片（id+reason+type，type 为 Jellyfin 原始类型名小写） |
 | `session` | `{"session_id":"a1b2c3","history_count":4}` | 会话信息 |
 | `done` | `{"answer":"...","cards":[...],"session_id":"..."}` | 结束信号 |
 
@@ -46,7 +46,7 @@ thinking  →  tool(calling)  →  tool(done)  →  thinking  →  token×N  →
 4. thinking     → 准备接收文字
 5. token×N      → 拼接并实时渲染 markdown 文本
 6. thinking     → 显示 "生成推荐理由..."
-7. card×N       → 拿到 id，调 getMediaItemDetail(id) 获取完整数据并渲染卡片
+7. card×N       → 拿到 id + type（如 movie/audio/musicalbum/musicartist），调 getMediaItemDetail(id) 获取完整数据并渲染卡片
 8. session      → 保存 session_id 用于多轮对话
 9. done         → 关闭 SSE 连接，用 answer+cards 兜底
 ```

@@ -655,9 +655,100 @@ def get_items_overview(
     return "\n".join(lines)
 
 
+# ── 辅助：电视剧搜索（带歧义消除）─────────────────────────
+
+def _search_series(series_keyword: str, limit: int = 3) -> tuple[list[dict], str]:
+    """搜索电视剧，返回 (候选列表, 提示文本)。
+
+    如果只找到1条 → 直接返回
+    如果找到多条 → 返回候选提示文本供 LLM 判断
+    如果没有 → 返回空列表 + 未找到提示
+    """
+    api, user_id = _connect()
+    result = api._get("Items", params={
+        "UserId": user_id,
+        "SearchTerm": series_keyword,
+        "IncludeItemTypes": "Series",
+        "Recursive": "true",
+        "Limit": limit,
+    })
+    items = result.get("Items", [])
+
+    if not items:
+        return [], f"未找到电视剧 '{series_keyword}'。"
+
+    if len(items) == 1:
+        return items, ""
+
+    # 多条结果 → 生成歧义提示
+    lines = [f"搜索 '{series_keyword}' 找到 {len(items)} 部电视剧，请判断用户指的是哪部："]
+    for i, item in enumerate(items, 1):
+        name = item.get("Name", "Unknown")
+        year = item.get("ProductionYear", "")
+        rating = item.get("CommunityRating", "")
+        genres = ", ".join(item.get("Genres", [])[:3])
+        year_str = f" ({year})" if year else ""
+        rating_str = f" 评分:{rating}" if rating else ""
+        genres_str = f" [{genres}]" if genres else ""
+        lines.append(f"  {i}. {name}{year_str}{rating_str}{genres_str}")
+
+    return items, "\n".join(lines)
+
+
+# ── 详情 / 元数据 Tools ─────────────────────────────────────
+
+@tool
+def get_seasons(series_keyword: str) -> str:
+    """获取某部电视剧的所有季信息（季号、季名、集数）。
+
+    用于回答"有哪些季"、"共几季"、"第几季"等问题。
+    搜索时如果发现同名电视剧，会列出候选供判断。
+
+    参数:
+        series_keyword: 电视剧名称关键字
+    """
+    api, user_id = _connect()
+
+    candidates, hint = _search_series(series_keyword)
+    if not candidates:
+        return hint
+
+    # 如果有多条候选，提示 LLM 选择
+    if len(candidates) > 1:
+        return hint + "\n\n请明确指定电视剧名称后重试，或告诉用户找到的多部同名电视剧让其选择。"
+
+    series = candidates[0]
+    series_id = series["Id"]
+    series_name = series.get("Name", "")
+
+    seasons = safe_get(f"Shows/{series_id}/Seasons", params={
+        "UserId": user_id,
+        "Fields": "Overview,CommunityRating",
+    })
+    season_items = seasons.get("Items", [])
+
+    if not season_items:
+        return f"'{series_name}' 没有找到季信息。"
+
+    lines = [f"=== {series_name}（共 {len(season_items)} 季）===\n"]
+    for s in season_items:
+        s_num = s.get("IndexNumber", "?")
+        s_name = s.get("Name", "Unknown")
+        ep_count = s.get("RecursiveItemCount", 0)
+        rating = s.get("CommunityRating", "")
+        year = s.get("ProductionYear", "")
+        rating_str = f" 评分:{rating}" if rating else ""
+        year_str = f" ({year})" if year else ""
+        lines.append(f"  第{s_num}季: {s_name}{year_str} — {ep_count}集{rating_str}")
+
+    return "\n".join(lines)
+
+
 @tool
 def get_episodes(series_keyword: str, season_number: int = 1) -> str:
     """获取某部电视剧指定季的剧集列表（含每集简介）。
+
+    搜索时如果发现同名电视剧，会列出候选供判断。
 
     参数:
         series_keyword: 电视剧名称关键字
@@ -665,19 +756,15 @@ def get_episodes(series_keyword: str, season_number: int = 1) -> str:
     """
     api, user_id = _connect()
 
-    # 先搜 Series
-    result = api._get("Items", params={
-        "UserId": user_id,
-        "SearchTerm": series_keyword,
-        "IncludeItemTypes": "Series",
-        "Recursive": "true",
-        "Limit": 1,
-    })
-    items = result.get("Items", [])
-    if not items:
-        return f"未找到电视剧 '{series_keyword}'。"
+    candidates, hint = _search_series(series_keyword)
+    if not candidates:
+        return hint
 
-    series = items[0]
+    # 如果有多条候选，提示 LLM 选择
+    if len(candidates) > 1:
+        return hint + "\n\n请明确指定电视剧名称后重试，或告诉用户找到的多部同名电视剧让其选择。"
+
+    series = candidates[0]
     series_id = series["Id"]
     series_name = series.get("Name", "")
 
@@ -1218,7 +1305,7 @@ ALL_TOOLS = [
     search_media, search_media_json,
     get_genres, get_years, get_libraries, get_media_stats,
     get_item_detail, get_item_overview, get_items_overview,
-    get_episodes, get_album_tracks, get_play_status,
+    get_seasons, get_episodes, get_album_tracks, get_play_status,
     get_next_up, get_resume_items, get_latest, search_artists,
     search_songs_by_artist, search_songs_by_artist_json, get_similar, get_lyrics,
 ]

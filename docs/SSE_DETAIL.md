@@ -67,14 +67,14 @@ data: {"content": "要求，推荐3部经典科幻电影：\n\n"}
 event: thinking    ← 正在生成推荐理由
 data: {"node": "reason"}
 
-event: card        ← 第1张推荐卡片（含推荐理由）
-data: {"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题"}
+event: card        ← 第1张推荐卡片（含推荐理由 + 卡片类型）
+data: {"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题", "type": "movie"}
 
 event: card        ← 第2张
-data: {"id": "4626c39dcf0b8e2a4b127ae39ba4a689", "reason": "黑帮电影巅峰，家族与权力的深刻演绎"}
+data: {"id": "4626c39dcf0b8e2a4b127ae39ba4a689", "reason": "黑帮电影巅峰，家族与权力的深刻演绎", "type": "movie"}
 
 event: card        ← 第3张
-data: {"id": "5787daf8b4a0f8ce3adc2d6e1d1f1f8a", "reason": "励志传奇，傻人有傻福的温暖人生故事"}
+data: {"id": "5787daf8b4a0f8ce3adc2d6e1d1f1f8a", "reason": "励志传奇，傻人有傻福的温暖人生故事", "type": "movie"}
 
 event: session     ← 会话信息
 data: {"session_id": "a1b2c3d4", "history_count": 2}
@@ -157,18 +157,36 @@ data: {"answer": "根据您的要求，推荐3部经典科幻电影：...", "car
 ### 4. `card` — 推荐卡片（最终推荐阶段）
 
 ```json
-{"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题"}
+{"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题", "type": "movie"}
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | string | Jellyfin Item ID，全局唯一 |
 | `reason` | string | LLM 生成的推荐理由（10-20 字） |
+| `type` | string | 卡片类型，直接透传 Jellyfin 原始类型名（小写），帮助前端决定跳转到哪个详情页。可选值见下表 |
+
+**type 枚举说明**：
+
+| type 值 | 对应 Jellyfin 类型 | 说明 |
+|---------|-------------------|------|
+| `movie` | Movie | 电影 |
+| `series` | Series | 电视剧 |
+| `episode` | Episode | 剧集 |
+| `video` | Video | 通用视频 |
+| `season` | Season | 季 |
+| `audio` | Audio | 歌曲 |
+| `musicalbum` | MusicAlbum | 音乐专辑 |
+| `musicartist` | MusicArtist | 歌手/艺术家 |
+| `musicvideo` | MusicVideo | 音乐视频 |
+| `book` | Book | 书籍 |
+| `comicbook` | ComicBook | 漫画 |
 
 **关键设计**：
 - card **只在最终推荐阶段发送**，不在搜索中间过程发送
-- 只包含 `id` + `reason`，不包含 name/type/year/rating 等冗余字段
+- 包含 `id` + `reason` + `type`，不包含 name/year/rating 等冗余字段
 - 客户端拿到 `id` 后，调用 `getMediaItemDetail(id)` 从 Jellyfin 获取完整数据
+- 客户端根据 `type` 决定点击卡片后跳转到哪个详情页
 - card 在所有 token 之后、done 之前推送
 
 **获取完整数据的 Jellyfin API**：
@@ -198,8 +216,8 @@ GET /detail?item_id={id}
 {
   "answer": "根据您的要求，推荐3部经典科幻电影：\n\n## 1. 肖申克的救赎...",
   "cards": [
-    {"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题"},
-    {"id": "4626c39dcf0b8e2a4b127ae39ba4a689", "reason": "黑帮电影巅峰，家族与权力的深刻演绎"}
+    {"id": "5269cdea534b8be612b06bdf8fc73a3b", "reason": "影史经典，讲述希望与自由的永恒主题", "type": "movie"},
+    {"id": "4626c39dcf0b8e2a4b127ae39ba4a689", "reason": "黑帮电影巅峰，家族与权力的深刻演绎", "type": "movie"}
   ],
   "session_id": "a1b2c3d4"
 }
@@ -208,7 +226,7 @@ GET /detail?item_id={id}
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `answer` | string | 完整的 LLM 回复文本（与 token 拼接结果一致） |
-| `cards` | array | 所有推荐卡片的 `id` + `reason` 数组 |
+| `cards` | array | 所有推荐卡片的 `id` + `reason` + `type` 数组 |
 | `session_id` | string | 会话 ID |
 
 **客户端行为**：
@@ -221,7 +239,7 @@ GET /detail?item_id={id}
 
 ### 核心原则
 
-**文字逐字涌现，卡片在文本之后一次性出现，客户端用 id 自查详情。**
+**文字逐字涌现，卡片在文本之后一次性出现，客户端用 id 自查详情，用 type（如 movie、audio、musicartist）决定跳转。**
 
 ### 渲染流程
 
@@ -239,8 +257,9 @@ GET /detail?item_id={id}
 **阶段二：卡片渲染**
 
 ```
-收到 card          → 拿到 id + reason
+收到 card          → 拿到 id + reason + type
                    → 调 getMediaItemDetail(id) 获取完整数据
+                   → 根据 type 决定卡片点击后的跳转目标页
                    → 渲染卡片（海报、名称、评分、推荐理由等）
                    → 卡片按序排列在文本下方
 ```
