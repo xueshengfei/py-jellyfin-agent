@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Jellyfin Agent Server (Port 5000)
+title Jellyfin Agent Server (Port 5005)
 
 echo ========================================
 echo   Jellyfin Agent - One Click Start
@@ -37,7 +37,7 @@ echo [INFO] Installing dependencies...
 pip install -r requirements.txt -q
 
 echo.
-echo [INFO] Starting Jellyfin Agent on http://localhost:5000
+echo [INFO] Starting Jellyfin Agent on http://localhost:5005
 echo [INFO] Press Ctrl+C to stop
 echo.
 
